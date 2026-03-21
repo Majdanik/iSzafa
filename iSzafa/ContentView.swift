@@ -2,6 +2,7 @@ import SwiftUI
 import SwiftData
 import PhotosUI
 import Vision
+import WebKit
 import CoreImage.CIFilterBuiltins
 
 // ==========================================
@@ -93,6 +94,7 @@ struct WardrobeView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \ClothingItem.dateAdded, order: .reverse) private var closetItems: [ClothingItem]
     
+    @State private var isShowingBrowser = false
     @State private var selectedItem: PhotosPickerItem?
     @State private var processedImage: UIImage?
     @State private var isProcessing = false
@@ -150,6 +152,17 @@ struct WardrobeView: View {
                             Label("Galeria", systemImage: "photo.on.rectangle")
                                 .padding().frame(maxWidth: .infinity)
                                 .background(Color.blue).foregroundColor(.white).cornerRadius(10)
+                        }
+                        
+                        Button(action: { isShowingBrowser = true }) {
+                            Label("Z internetu", systemImage: "globe")
+                                .padding().frame(maxWidth: .infinity)
+                                .background(Color.purple).foregroundColor(.white).cornerRadius(10)
+                        }
+                        .sheet(isPresented: $isShowingBrowser) {
+                            BrowserView { downloadedImage in
+                                removeBackground(from: downloadedImage)
+                            }
                         }
                         
                         if processedImage != nil {
@@ -461,5 +474,107 @@ struct AccessoryDraggableView: View {
                         }
                 )
         }
+    }
+}
+struct WebView: UIViewRepresentable {
+    let url: URL
+    var onImagePicked: (String) -> Void // Przesyłamy link do wybranego zdjęcia
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onImagePicked: onImagePicked)
+    }
+
+    func makeUIView(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        let userContentController = WKUserContentController()
+        
+        userContentController.add(context.coordinator, name: "imageClicked")
+        config.userContentController = userContentController
+        
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.navigationDelegate = context.coordinator
+        webView.load(URLRequest(url: url))
+        return webView
+    }
+
+    func updateUIView(_ uiView: WKWebView, context: Context) {}
+
+    class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+        var onImagePicked: (String) -> Void
+
+        init(onImagePicked: @escaping (String) -> Void) {
+            self.onImagePicked = onImagePicked
+        }
+
+        // JavaScript, który dodano na stronę
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            let script = """
+            document.addEventListener('click', function(e) {
+                var element = e.target;
+                if (element.tagName === 'IMG') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    window.webkit.messageHandlers.imageClicked.postMessage(element.src);
+                }
+            }, true);
+            """
+            webView.evaluateJavaScript(script, completionHandler: nil)
+        }
+
+        // Odbieranie wiadomości z JavaScriptu
+        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            if message.name == "imageClicked", let imageUrl = message.body as? String {
+                onImagePicked(imageUrl)
+            }
+        }
+    }
+}
+struct BrowserView: View {
+    @Environment(\.dismiss) var dismiss
+    @State private var urlString = "https://www.google.com/search?q=ubrania+sklep+produkty"
+    @State private var selectedImage: UIImage?
+    @State private var showingConfirmation = false
+    @State private var tempImageUrl = ""
+    
+    var onImageSelected: (UIImage) -> Void
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                WebView(url: URL(string: urlString)!) { imageUrl in
+                    self.tempImageUrl = imageUrl
+                    downloadImage(from: imageUrl)
+                }
+            }
+            .navigationTitle("Kliknij w ubranie")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) { Button("Zamknij") { dismiss() } }
+            }
+            // Okienko potwierdzenia po kliknięciu w zdjęcie
+            .alert("Dodać to ubranie?", isPresented: $showingConfirmation) {
+                Button("Tak, dodaj") {
+                    if let img = selectedImage {
+                        onImageSelected(img)
+                        dismiss()
+                    }
+                }
+                Button("Anuluj", role: .cancel) { }
+            } message: {
+                Text("Znalazłeś fajny produkt! Chcesz go przenieść do szafy?")
+            }
+        }
+    }
+
+    func downloadImage(from urlString: String) {
+        guard let url = URL(string: urlString) else { return }
+        URLSession.shared.dataTask(with: url) { data, _, _ in
+            if let data = data, let image = UIImage(data: data) {
+                DispatchQueue.main.async {
+                    self.selectedImage = image
+                    self.showingConfirmation = true
+                }
+            }
+        }.resume()
     }
 }
