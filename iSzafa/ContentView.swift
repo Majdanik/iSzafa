@@ -24,7 +24,7 @@ class ClothingItem {
     @Attribute(.externalStorage) var imageData: Data
     var dateAdded: Date
     var categoryRawValue: String
-    
+    var outfits: [SavedOutfit]? = []
 
     var category: ItemCategory {
         if let newCategory = ItemCategory(rawValue: categoryRawValue) {
@@ -49,6 +49,23 @@ class ClothingItem {
     }
 }
 
+@Model
+class SavedOutfit {
+    var id: UUID
+    var name: String
+    var dateCreated: Date
+    
+    @Relationship(inverse: \ClothingItem.outfits)
+    var items: [ClothingItem]
+    
+    init(name: String, items: [ClothingItem]) {
+        self.id = UUID()
+        self.name = name
+        self.dateCreated = Date()
+        self.items = items
+    }
+}
+
 struct CanvasItem: Identifiable {
     let id = UUID()
     let clothing: ClothingItem
@@ -58,14 +75,13 @@ struct CanvasItem: Identifiable {
 }
 
 // ==========================================
-// WIDOK POMOCNICZY DLA UBRAŃ
+// WIDOK POMOCNICZY
 // ==========================================
 struct ClothingItemImageView: View {
     let uiImage: UIImage
     let category: ItemCategory
     
     var body: some View {
-        
         Image(uiImage: uiImage)
             .resizable()
             .scaledToFit()
@@ -73,8 +89,58 @@ struct ClothingItemImageView: View {
 }
 
 // ==========================================
-// 2. GŁÓWNY WIDOK
+// 2. GŁÓWNY WIDOK (Lookbook)
 // ==========================================
+struct OutfitsListView: View {
+    @Environment(\.modelContext) private var modelContext
+    @Query(sort: \SavedOutfit.dateCreated, order: .reverse) private var savedOutfits: [SavedOutfit]
+    
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(savedOutfits) { outfit in
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text(outfit.name)
+                            .font(.headline)
+                        
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack {
+                                ForEach(outfit.items) { item in
+                                    if let uiImage = UIImage(data: item.imageData) {
+                                        Image(uiImage: uiImage)
+                                            .resizable()
+                                            .scaledToFit()
+                                            .frame(width: 60, height: 60)
+                                            .background(Color.gray.opacity(0.1))
+                                            .cornerRadius(8)
+                                    }
+                                }
+                            }
+                        }
+                        Text(outfit.dateCreated.formatted(date: .abbreviated, time: .omitted))
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.vertical, 5)
+                }
+                .onDelete(perform: deleteOutfit)
+            }
+            .navigationTitle("Moje Stylizacje")
+            .overlay {
+                if savedOutfits.isEmpty {
+                    ContentUnavailableView("Brak stylizacji", systemImage: "star.fill", description: Text("Stwórz i zapisz swój pierwszy outfit w Kreatorze."))
+                }
+            }
+        }
+    }
+    
+    func deleteOutfit(at offsets: IndexSet) {
+        for index in offsets {
+            modelContext.delete(savedOutfits[index])
+        }
+    }
+}
+
 struct ContentView: View {
     var body: some View {
         TabView {
@@ -83,12 +149,15 @@ struct ContentView: View {
             
             CreatorView()
                 .tabItem { Label("Kreator", systemImage: "wand.and.stars") }
+            
+            OutfitsListView()
+                .tabItem { Label("Lookbook", systemImage: "text.book.closed") }
         }
     }
 }
 
 // ==========================================
-// 3. WIDOK SZAFY (Skaner + Baza)
+// 3. WIDOK SZAFY
 // ==========================================
 struct WardrobeView: View {
     @Environment(\.modelContext) private var modelContext
@@ -104,8 +173,6 @@ struct WardrobeView: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 20) {
-                    
-                    // --- Skaner ---
                     ZStack {
                         RoundedRectangle(cornerRadius: 20)
                             .fill(Color.gray.opacity(0.1))
@@ -126,7 +193,6 @@ struct WardrobeView: View {
                     }
                     .padding(.horizontal)
                     
-                    // --- Wybór Kategorii ---
                     if processedImage != nil {
                         VStack(alignment: .leading) {
                             Text("Wybierz kategorię:").font(.subheadline).foregroundColor(.secondary).padding(.horizontal)
@@ -146,7 +212,6 @@ struct WardrobeView: View {
                         }
                     }
                     
-                    // --- Przyciski ---
                     HStack(spacing: 15) {
                         PhotosPicker(selection: $selectedItem, matching: .images) {
                             Label("Galeria", systemImage: "photo.on.rectangle")
@@ -177,7 +242,6 @@ struct WardrobeView: View {
                     
                     Divider().padding(.vertical)
                     
-                    // --- Siatka Ubrań (BRAK TŁA) ---
                     Text("Twoja Szafa (\(closetItems.count))")
                         .font(.title2).bold().frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal)
                     
@@ -186,7 +250,7 @@ struct WardrobeView: View {
                             if let uiImage = UIImage(data: item.imageData) {
                                 VStack {
                                     ClothingItemImageView(uiImage: uiImage, category: item.category)
-                                        .frame(height: 100) // W szafie wszystkie rzeczy są równe (100)
+                                        .frame(height: 100)
                                         .shadow(color: .black.opacity(0.15), radius: 5)
                                     
                                     Button(role: .destructive) { deleteItem(item) } label: {
@@ -252,20 +316,43 @@ struct WardrobeView: View {
 // ==========================================
 struct CreatorView: View {
     @Query private var allItems: [ClothingItem]
+    @Environment(\.modelContext) private var modelContext
     @State private var accessoryCanvasItems: [CanvasItem] = []
+    @State private var showingSaveAlert = false
+    @State private var newOutfitName = ""
+    
+    @State private var selectedTop: ClothingItem?
+    @State private var selectedBottom: ClothingItem?
+    @State private var selectedShoes: ClothingItem?
+    @State private var selectedHat: ClothingItem?
+    @State private var selectedGlasses: ClothingItem?
+
+    func saveOutfit() {
+        var itemsToSave: [ClothingItem] = []
+        if let h = selectedHat { itemsToSave.append(h) }
+        if let g = selectedGlasses { itemsToSave.append(g) }
+        if let t = selectedTop { itemsToSave.append(t) }
+        if let b = selectedBottom { itemsToSave.append(b) }
+        if let s = selectedShoes { itemsToSave.append(s) }
+        itemsToSave.append(contentsOf: accessoryCanvasItems.map { $0.clothing })
+        
+        if !itemsToSave.isEmpty {
+            let newOutfit = SavedOutfit(name: newOutfitName.isEmpty ? "Nowa stylizacja" : newOutfitName, items: itemsToSave)
+            modelContext.insert(newOutfit)
+            newOutfitName = ""
+        }
+    }
     
     var canvasContent: some View {
         ZStack {
             Color.gray.opacity(0.05).edgesIgnoringSafeArea(.all)
-            
             ZStack {
-                CategorySlotView(category: .shoes, items: allItems.filter { $0.category == .shoes }, defaultY: 200)
-                CategorySlotView(category: .bottom, items: allItems.filter { $0.category == .bottom }, defaultY: 80)
-                CategorySlotView(category: .top, items: allItems.filter { $0.category == .top }, defaultY: -70)
-                CategorySlotView(category: .glasses, items: allItems.filter { $0.category == .glasses }, defaultY: -180)
-                CategorySlotView(category: .hat, items: allItems.filter { $0.category == .hat }, defaultY: -230)
+                CategorySlotView(category: .shoes, items: allItems.filter { $0.category == .shoes }, defaultY: 200, selectedItem: $selectedShoes)
+                CategorySlotView(category: .bottom, items: allItems.filter { $0.category == .bottom }, defaultY: 80, selectedItem: $selectedBottom)
+                CategorySlotView(category: .top, items: allItems.filter { $0.category == .top }, defaultY: -70, selectedItem: $selectedTop)
+                CategorySlotView(category: .glasses, items: allItems.filter { $0.category == .glasses }, defaultY: -180, selectedItem: $selectedGlasses)
+                CategorySlotView(category: .hat, items: allItems.filter { $0.category == .hat }, defaultY: -230, selectedItem: $selectedHat)
             }
-            
             ForEach($accessoryCanvasItems) { $item in
                 AccessoryDraggableView(item: $item)
             }
@@ -276,8 +363,6 @@ struct CreatorView: View {
         NavigationStack {
             ZStack {
                 canvasContent.clipped()
-                
-                // --- SZUFLADA NA AKCESORIA ---
                 VStack {
                     Spacer()
                     let accessories = allItems.filter { $0.category == .accessories }
@@ -310,18 +395,21 @@ struct CreatorView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button("Usuń akcesoria") { accessoryCanvasItems.removeAll() }
-                        .font(.caption)
+                    Button("Usuń akcesoria") { accessoryCanvasItems.removeAll() }.font(.caption)
                 }
-                
                 ToolbarItem(placement: .topBarTrailing) {
-                    ShareLink(
-                        item: generateSnapshot(),
-                        preview: SharePreview("Mój Outfit", image: generateSnapshot())
-                    ) {
+                    ShareLink(item: generateSnapshot(), preview: SharePreview("Mój Outfit", image: generateSnapshot())) {
                         Image(systemName: "square.and.arrow.up").font(.headline)
                     }
                 }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { showingSaveAlert = true } label: { Image(systemName: "plus.circle.fill") }
+                }
+            }
+            .alert("Zapisz stylizację", isPresented: $showingSaveAlert) {
+                TextField("Nazwa", text: $newOutfitName)
+                Button("Zapisz") { saveOutfit() }
+                Button("Anuluj", role: .cancel) { }
             }
         }
     }
@@ -332,27 +420,25 @@ struct CreatorView: View {
             Color.white.edgesIgnoringSafeArea(.all)
             canvasContent
         }.frame(width: 400, height: 600)
-        
         let renderer = ImageRenderer(content: exportView)
         renderer.scale = 2.0
-        
         if let uiImage = renderer.uiImage { return Image(uiImage: uiImage) }
         return Image(systemName: "photo")
     }
 }
 
 // ==========================================
-// 5. POJEDYNCZE PIĘTRO W KREATORZE
+// 5. POJEDYNCZE PIĘTRO
 // ==========================================
 struct CategorySlotView: View {
     let category: ItemCategory
     let items: [ClothingItem]
     let defaultY: CGFloat
+    @Binding var selectedItem: ClothingItem?
     
     @State private var currentIndex: Int = 0
     @State private var offset: CGSize = .zero
     @State private var scale: CGFloat = 1.0
-    
     @State private var currentDrag: CGSize = .zero
     @State private var currentMagnification: CGFloat = 1.0
     
@@ -363,62 +449,45 @@ struct CategorySlotView: View {
                     .font(.system(size: 40, weight: .bold))
                     .foregroundColor(items.isEmpty ? .clear : .gray.opacity(0.5))
             }
-            .padding(.leading, 10)
-            .disabled(items.isEmpty)
-            
+            .padding(.leading, 10).disabled(items.isEmpty)
             Spacer()
-            
             if items.isEmpty {
-                Text("Brak: \(category.rawValue)")
-                    .font(.caption).foregroundColor(.gray.opacity(0.4))
-                    .frame(height: defaultHeight())
+                Text("Brak: \(category.rawValue)").font(.caption).foregroundColor(.gray.opacity(0.4)).frame(height: defaultHeight())
             } else {
                 if let uiImage = UIImage(data: items[currentIndex].imageData) {
                     ClothingItemImageView(uiImage: uiImage, category: category)
                         .frame(height: defaultHeight())
                         .scaleEffect(scale * currentMagnification)
-                        .offset(x: offset.width + currentDrag.width,
-                                y: offset.height + currentDrag.height)
-                        .gesture(
-                            DragGesture()
-                                .onChanged { value in currentDrag = value.translation }
-                                .onEnded { value in
-                                    offset.width += value.translation.width
-                                    offset.height += value.translation.height
-                                    currentDrag = .zero
-                                }
-                        )
-                        .simultaneousGesture(
-                            MagnificationGesture()
-                                .onChanged { value in currentMagnification = value }
-                                .onEnded { value in
-                                    scale *= value
-                                    currentMagnification = 1.0
-                                }
-                        )
+                        .offset(x: offset.width + currentDrag.width, y: offset.height + currentDrag.height)
+                        .gesture(DragGesture().onChanged { value in currentDrag = value.translation }.onEnded { value in
+                            offset.width += value.translation.width; offset.height += value.translation.height; currentDrag = .zero
+                        })
+                        .simultaneousGesture(MagnificationGesture().onChanged { value in currentMagnification = value }.onEnded { value in
+                            scale *= value; currentMagnification = 1.0
+                        })
                 }
             }
-            
             Spacer()
-            
             Button(action: { changeItem(1) }) {
                 Image(systemName: "chevron.compact.right")
                     .font(.system(size: 40, weight: .bold))
                     .foregroundColor(items.isEmpty ? .clear : .gray.opacity(0.5))
             }
-            .padding(.trailing, 10)
-            .disabled(items.isEmpty)
+            .padding(.trailing, 10).disabled(items.isEmpty)
         }
         .offset(y: defaultY)
+        .onAppear { updateSelection() }
     }
     
     func changeItem(_ step: Int) {
         if items.isEmpty { return }
         currentIndex = (currentIndex + step + items.count) % items.count
-        withAnimation(.spring()) {
-            offset = .zero
-            scale = 1.0
-        }
+        updateSelection()
+        withAnimation(.spring()) { offset = .zero; scale = 1.0 }
+    }
+    
+    func updateSelection() {
+        if !items.isEmpty { selectedItem = items[currentIndex] }
     }
     
     func defaultHeight() -> CGFloat {
@@ -432,7 +501,7 @@ struct CategorySlotView: View {
 }
 
 // ==========================================
-// 6. WIDOK DLA AKCESORIÓW
+// 6. AKCESORIA
 // ==========================================
 struct AccessoryDraggableView: View {
     @Binding var item: CanvasItem
@@ -446,134 +515,75 @@ struct AccessoryDraggableView: View {
                 .frame(width: 100)
                 .scaleEffect(item.scale * currentScale)
                 .rotationEffect(item.rotation + currentRotation)
-                .offset(x: item.offset.width + currentDrag.width,
-                        y: item.offset.height + currentDrag.height)
-                .gesture(
-                    DragGesture()
-                        .onChanged { val in currentDrag = val.translation }
-                        .onEnded { val in
-                            item.offset.width += val.translation.width
-                            item.offset.height += val.translation.height
-                            currentDrag = .zero
-                        }
-                )
-                .simultaneousGesture(
-                    MagnificationGesture()
-                        .onChanged { val in currentScale = val }
-                        .onEnded { val in
-                            item.scale *= val
-                            currentScale = 1.0
-                        }
-                )
-                .simultaneousGesture(
-                    RotationGesture()
-                        .onChanged { val in currentRotation = val }
-                        .onEnded { val in
-                            item.rotation += val
-                            currentRotation = .zero
-                        }
-                )
+                .offset(x: item.offset.width + currentDrag.width, y: item.offset.height + currentDrag.height)
+                .gesture(DragGesture().onChanged { val in currentDrag = val.translation }.onEnded { val in
+                    item.offset.width += val.translation.width; item.offset.height += val.translation.height; currentDrag = .zero
+                })
+                .simultaneousGesture(MagnificationGesture().onChanged { val in currentScale = val }.onEnded { val in
+                    item.scale *= val; currentScale = 1.0
+                })
+                .simultaneousGesture(RotationGesture().onChanged { val in currentRotation = val }.onEnded { val in
+                    item.rotation += val; currentRotation = .zero
+                })
         }
     }
 }
+
+// ==========================================
+// 7. PRZEGLĄDARKA
+// ==========================================
 struct WebView: UIViewRepresentable {
     let url: URL
-    var onImagePicked: (String) -> Void // Przesyłamy link do wybranego zdjęcia
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(onImagePicked: onImagePicked)
-    }
-
+    var onImagePicked: (String) -> Void
+    func makeCoordinator() -> Coordinator { Coordinator(onImagePicked: onImagePicked) }
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
-        let userContentController = WKUserContentController()
-        
-        userContentController.add(context.coordinator, name: "imageClicked")
-        config.userContentController = userContentController
-        
+        let controller = WKUserContentController()
+        controller.add(context.coordinator, name: "imageClicked")
+        config.userContentController = controller
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
         webView.load(URLRequest(url: url))
         return webView
     }
-
     func updateUIView(_ uiView: WKWebView, context: Context) {}
-
     class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
         var onImagePicked: (String) -> Void
-
-        init(onImagePicked: @escaping (String) -> Void) {
-            self.onImagePicked = onImagePicked
-        }
-
-        // JavaScript, który dodano na stronę
+        init(onImagePicked: @escaping (String) -> Void) { self.onImagePicked = onImagePicked }
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            let script = """
-            document.addEventListener('click', function(e) {
-                var element = e.target;
-                if (element.tagName === 'IMG') {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    window.webkit.messageHandlers.imageClicked.postMessage(element.src);
-                }
-            }, true);
-            """
-            webView.evaluateJavaScript(script, completionHandler: nil)
+            let script = "document.addEventListener('click', function(e) { var el = e.target; if (el.tagName === 'IMG') { e.preventDefault(); e.stopPropagation(); window.webkit.messageHandlers.imageClicked.postMessage(el.src); } }, true);"
+            webView.evaluateJavaScript(script)
         }
-
-        // Odbieranie wiadomości z JavaScriptu
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-            if message.name == "imageClicked", let imageUrl = message.body as? String {
-                onImagePicked(imageUrl)
-            }
+            if message.name == "imageClicked", let url = message.body as? String { onImagePicked(url) }
         }
     }
 }
+
 struct BrowserView: View {
     @Environment(\.dismiss) var dismiss
     @State private var urlString = "https://www.google.com/search?q=ubrania+sklep+produkty"
     @State private var selectedImage: UIImage?
     @State private var showingConfirmation = false
-    @State private var tempImageUrl = ""
-    
     var onImageSelected: (UIImage) -> Void
 
     var body: some View {
         NavigationStack {
-            ZStack {
-                WebView(url: URL(string: urlString)!) { imageUrl in
-                    self.tempImageUrl = imageUrl
-                    downloadImage(from: imageUrl)
-                }
-            }
+            WebView(url: URL(string: urlString)!) { url in downloadImage(from: url) }
             .navigationTitle("Kliknij w ubranie")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) { Button("Zamknij") { dismiss() } }
-            }
-            // Okienko potwierdzenia po kliknięciu w zdjęcie
+            .toolbar { ToolbarItem(placement: .topBarLeading) { Button("Zamknij") { dismiss() } } }
             .alert("Dodać to ubranie?", isPresented: $showingConfirmation) {
-                Button("Tak, dodaj") {
-                    if let img = selectedImage {
-                        onImageSelected(img)
-                        dismiss()
-                    }
-                }
-                Button("Anuluj", role: .cancel) { }
-            } message: {
-                Text("Znalazłeś fajny produkt! Chcesz go przenieść do szafy?")
+                Button("Tak") { if let img = selectedImage { onImageSelected(img); dismiss() } }
+                Button("Nie", role: .cancel) { }
             }
         }
     }
-
     func downloadImage(from urlString: String) {
         guard let url = URL(string: urlString) else { return }
         URLSession.shared.dataTask(with: url) { data, _, _ in
             if let data = data, let image = UIImage(data: data) {
-                DispatchQueue.main.async {
-                    self.selectedImage = image
-                    self.showingConfirmation = true
-                }
+                DispatchQueue.main.async { self.selectedImage = image; self.showingConfirmation = true }
             }
         }.resume()
     }
